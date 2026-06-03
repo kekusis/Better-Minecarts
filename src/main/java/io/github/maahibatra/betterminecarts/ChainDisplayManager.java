@@ -94,7 +94,8 @@ public class ChainDisplayManager {
         if (display == null) return null;
 
         // Set chain block state (horizontal axis via block property)
-        BlockState chainState = Blocks.CHAIN.getDefaultState();
+        BlockState chainState = net.minecraft.block.Blocks.IRON_CHAIN.getDefaultState()
+            .with(net.minecraft.state.property.Properties.AXIS, net.minecraft.util.math.Direction.Axis.X);
         display.setBlockState(chainState);
 
         // Position at midpoint, offset down slightly to align with cart body
