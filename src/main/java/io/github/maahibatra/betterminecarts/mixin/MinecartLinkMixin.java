@@ -2,6 +2,7 @@ package io.github.maahibatra.betterminecarts.mixin;
 
 import io.github.maahibatra.betterminecarts.access.MinecartLinkAccess;
 import net.minecraft.entity.vehicle.AbstractMinecartEntity;
+import net.minecraft.entity.Entity;
 import net.minecraft.storage.WriteView;
 import net.minecraft.storage.ReadView;
 import org.spongepowered.asm.mixin.Mixin;
@@ -61,5 +62,18 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
                 }
             }
         });
+    }
+
+    @Inject(method = "pushAwayFrom", at = @At("HEAD"), cancellable = true)
+    private void betterminecarts$cancelPush(Entity entity, CallbackInfo ci) {
+        if (entity instanceof AbstractMinecartEntity other) {
+            if (this.betterminecarts$linkedCarts.contains(other.getUuid())) {
+                ci.cancel();
+            }
+            // Also check if the OTHER minecart is linked to THIS minecart
+            if (((MinecartLinkAccess)other).betterminecarts$getLinkedCarts().contains(((AbstractMinecartEntity)(Object)this).getUuid())) {
+                ci.cancel();
+            }
+        }
     }
 }

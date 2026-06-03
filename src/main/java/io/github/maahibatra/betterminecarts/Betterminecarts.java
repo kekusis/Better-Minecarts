@@ -9,6 +9,7 @@ import net.fabricmc.fabric.api.event.player.UseEntityCallback;
 import net.minecraft.block.AbstractRailBlock;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.vehicle.AbstractMinecartEntity;
+import net.minecraft.entity.vehicle.FurnaceMinecartEntity;
 import net.minecraft.item.ItemStack;
 import net.minecraft.item.Items;
 import net.minecraft.server.world.ServerWorld;
@@ -187,30 +188,67 @@ public class Betterminecarts implements ModInitializer {
                     }
 
                     // Spring physics target distance is 2.0 blocks
-                    double targetDist = 2.0;
-                    double diff = dist - targetDist;
-                    
-                    if (Math.abs(diff) > 0.05) {
-                        // Direction from A to B
-                        Vec3d dir = posB.subtract(posA).normalize();
-                        
-                        // Calculate spring force (pulls them together if diff > 0, pushes apart if diff < 0)
-                        double stiffness = 0.15; // Moderate stiffness
-                        Vec3d springForce = dir.multiply(diff * stiffness);
+                    double targetDist = 2.4; 
+                    Vec3d velA = cartA.getVelocity();
+                    Vec3d velB = cartB.getVelocity();
+                    double speedA = velA.length();
+                    double speedB = velB.length();
 
-                        // Apply force
-                        cartA.addVelocity(springForce.x, 0, springForce.z);
-                        cartB.addVelocity(-springForce.x, 0, -springForce.z);
-                        
-                        // Sync velocities moderately to reduce bouncing
-                        Vec3d velA = cartA.getVelocity();
-                        Vec3d velB = cartB.getVelocity();
-                        Vec3d avgVel = velA.add(velB).multiply(0.5);
-                        
-                        // Blend current velocity with average velocity
-                        cartA.setVelocity(velA.lerp(avgVel, 0.2));
-                        cartB.setVelocity(velB.lerp(avgVel, 0.2));
+                    // If both carts are basically stopped, strictly kill their velocities to stop jittering
+                    if (speedA < 0.01 && speedB < 0.01) {
+                        if (Math.abs(dist - targetDist) < 0.3) {
+                            cartA.setVelocity(Vec3d.ZERO);
+                            cartB.setVelocity(Vec3d.ZERO);
+                        }
+                        continue;
                     }
+
+                    // Determine Leader (Engine) by highest speed
+                    AbstractMinecartEntity leader = speedA >= speedB ? cartA : cartB;
+                    
+                    AbstractMinecartEntity follower = leader == cartA ? cartB : cartA;
+
+                    double leaderSpeed = leader.getVelocity().length();
+                    Vec3d leaderDir = leader.getVelocity().normalize();
+                    
+                    if (leaderSpeed < 0.01) {
+                        leaderDir = follower.getEntityPos().subtract(leader.getEntityPos()).normalize().multiply(-1);
+                    }
+
+                    // Determine if the Follower is in front of or behind the Leader
+                    Vec3d leaderToFollower = follower.getEntityPos().subtract(leader.getEntityPos());
+                    boolean followerIsInFront = leaderToFollower.dotProduct(leaderDir) > 0;
+
+                    // Calculate Distance Correction
+                    double diff = dist - targetDist;
+                    double adjustment = diff * 0.4; // Extremely rigid correction
+                    
+                    if (followerIsInFront) {
+                        // If Follower is in front, and too far (diff > 0), it must SLOW DOWN to let leader catch up
+                        // If too close (diff < 0), it must SPEED UP to run away
+                        adjustment = -adjustment;
+                    }
+
+                    // Apply Fully Rigid Clone Speed
+                    double newFollowerSpeed = leaderSpeed + adjustment;
+
+                    // A follower CANNOT physically reverse on the track to fix its distance!
+                    // If the adjustment requires it to go backwards, it must simply hit the brakes (speed = 0).
+                    newFollowerSpeed = Math.max(0.0, newFollowerSpeed);
+
+                    // Set Follower Velocity exactly along its track
+                    Vec3d followerDir = follower.getVelocity().normalize();
+                    if (follower.getVelocity().lengthSquared() < 0.0001) {
+                        // If stopped, we cannot use leaderDir because of U-turns.
+                        // We must use the vector pointing between them.
+                        Vec3d toLeader = leader.getEntityPos().subtract(follower.getEntityPos()).normalize();
+                        
+                        // If Follower is behind, it must move TOWARDS the leader.
+                        // If Follower is in front, it must move AWAY from the leader.
+                        followerDir = followerIsInFront ? toLeader.multiply(-1) : toLeader;
+                    }
+
+                    follower.setVelocity(followerDir.multiply(newFollowerSpeed));
                 }
             }
         });
