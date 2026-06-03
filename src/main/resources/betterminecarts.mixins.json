@@ -4,6 +4,7 @@
   "package": "io.github.maahibatra.betterminecarts.mixin",
   "compatibilityLevel": "JAVA_21",
   "mixins": [
+    "MinecartLinkMixin"
   ],
   "client": [
   ],
