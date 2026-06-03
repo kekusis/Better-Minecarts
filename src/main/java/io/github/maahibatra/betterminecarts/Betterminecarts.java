@@ -25,8 +25,6 @@ public class Betterminecarts implements ModInitializer {
     private final Map<UUID, UUID> selectedCarts = new HashMap<>();
     // Prevents double-firing: stores the server tick of each player's last interaction
     private final Map<UUID, Long> lastInteractTick = new HashMap<>();
-    // Manages visual chain display entities
-    private final ChainDisplayManager chainDisplayManager = new ChainDisplayManager();
 
     @Override
     public void onInitialize() {
@@ -215,9 +213,6 @@ public class Betterminecarts implements ModInitializer {
                     }
                 }
             }
-
-            // Update chain display entities
-            chainDisplayManager.tick(world);
         });
     }
 }
