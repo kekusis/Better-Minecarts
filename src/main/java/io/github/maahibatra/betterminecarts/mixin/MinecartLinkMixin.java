@@ -71,24 +71,14 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
             double leaderSpeed = leaderVel.length();
             double maxSpeed = this.getMaxSpeed(serverWorld);
 
-            Vec3d followerVel = self.getVelocity();
-            Vec3d travelDir = dirToLeader;
-            // If already moving and not moving backwards relative to leader, keep the current direction
-            // of travel (which is perfectly aligned with the rail geometry, avoiding projection losses on 180 turns)
-            if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToLeader) >= -0.1) {
-                travelDir = followerVel.normalize();
-            }
-
             if (distance > TARGET_SPACING) {
-                // Too far: catch up aggressively.
-                // Additive error term (1.5x gain) ensures the follower accelerates beyond leader's speed
-                // to close the gap. Capped at 3.0 * maxSpeed so the projected velocity along the rail
-                // will always hit the absolute maximum limit of the cart.
-                double catchUpSpeed = Math.min(
-                    Math.max(leaderSpeed, 0.1) + (distance - TARGET_SPACING) * 1.5,
-                    maxSpeed * 3.0
-                );
-                self.setVelocity(travelDir.multiply(catchUpSpeed));
+                // Too far: catch up.
+                // We use a PD-like proportional boost (leaderSpeed + excess * 2.0) so the follower
+                // actively speeds up relative to the leader to close the gap.
+                // Clamped to 3.0 * maxSpeed (e.g. 1.2) to overcome extreme corner projection angles.
+                double excess = distance - TARGET_SPACING;
+                double catchUpSpeed = Math.min(leaderSpeed + excess * 2.0, maxSpeed * 3.0);
+                self.setVelocity(dirToLeader.multiply(catchUpSpeed));
 
             } else if (distance < TARGET_SPACING - 0.2) {
                 // Too close: nudge gently backward away from leader
@@ -96,7 +86,7 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
 
             } else {
                 // In the sweet spot: exactly match leader's speed.
-                self.setVelocity(travelDir.multiply(Math.min(leaderSpeed, maxSpeed)));
+                self.setVelocity(dirToLeader.multiply(Math.min(leaderSpeed, maxSpeed)));
             }
 
             // ── Particle Tether ───────────────────────────────────────────────
@@ -123,13 +113,15 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
                 betterminecarts$followerUuid = null;
             } else {
                 // Follower is present: if it's lagging, slow down this leader cart to let it catch up.
-                // Increased aggressiveness: 1.2x multiplier. If follower is >0.8 blocks behind target spacing,
-                // the leader will be virtually stopped until the follower catches up.
+                // This propagates tension back through the chain, keeping the train cohesive on turns.
                 double followerDist = self.distanceTo(follower) - 1.0;
                 final double TARGET_SPACING = 1.4;
                 if (followerDist > TARGET_SPACING + 0.05) {
+                    // Lagging behind: apply a steep slowdown factor to the leader.
+                    // If excess is >= 0.5 blocks, the leader is choked down to 5% speed,
+                    // giving the follower immediate time to catch up.
                     double excess = followerDist - TARGET_SPACING;
-                    double slowdownFactor = Math.max(0.02, 1.0 - excess * 1.2);
+                    double slowdownFactor = Math.max(0.05, 1.0 - excess * 2.0);
                     self.setVelocity(self.getVelocity().multiply(slowdownFactor));
                 }
             }
