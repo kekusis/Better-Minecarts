@@ -11,6 +11,7 @@ import net.minecraft.storage.ReadView;
 import net.minecraft.storage.WriteView;
 import net.minecraft.util.math.Vec3d;
 import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
@@ -20,6 +21,8 @@ import java.util.UUID;
 
 @Mixin(AbstractMinecartEntity.class)
 public abstract class MinecartLinkMixin implements MinecartLinkAccess {
+
+    @Shadow protected abstract double getMaxSpeed(ServerWorld world);
 
     // Directed linked list: this cart follows leaderUuid; followerUuid follows this cart.
     @Unique private UUID betterminecarts$leaderUuid = null;
@@ -66,13 +69,16 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
             Vec3d dirToLeader = leader.getEntityPos().subtract(self.getEntityPos()).normalize();
             Vec3d leaderVel   = leader.getVelocity();
             double leaderSpeed = leaderVel.length();
+            double maxSpeed = this.getMaxSpeed(serverWorld);
 
             if (distance > TARGET_SPACING) {
                 // Too far: catch up.
-                // Speed scales with distance gap (damped spring: further = faster catch-up).
-                // When leader is stopped, use a small constant to creep up.
+                // Do NOT clamp the velocity magnitude to maxSpeed here because vanilla will project
+                // it onto the rail shape (which multiplies it by cos(theta) <= 1.0).
+                // Instead, allow up to 2.0 * maxSpeed (e.g. 0.8) so the projected speed along the rail
+                // can still reach the absolute max speed.
                 double catchUpSpeed = leaderSpeed > 0.01
-                    ? Math.min(leaderSpeed * Math.min(distance, 2.0), 0.4)
+                    ? Math.min(leaderSpeed * distance, maxSpeed * 2.0)
                     : 0.05;
                 self.setVelocity(dirToLeader.multiply(catchUpSpeed));
 
@@ -83,7 +89,7 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
             } else {
                 // In the sweet spot: exactly match leader's speed.
                 // Direction doesn't matter — vanilla moveOnRail() overwrites it from rail shape.
-                self.setVelocity(dirToLeader.multiply(Math.min(leaderSpeed, 0.4)));
+                self.setVelocity(dirToLeader.multiply(Math.min(leaderSpeed, maxSpeed)));
             }
 
             // ── Particle Tether ───────────────────────────────────────────────
@@ -103,11 +109,21 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
             }
         }
 
-        // ── Follower cleanup ─────────────────────────────────────────────────
+        // ── Follower slowdown / cleanup ───────────────────────────────────────
         if (betterminecarts$followerUuid != null) {
             Entity followerEntity = serverWorld.getEntity(betterminecarts$followerUuid);
-            if (!(followerEntity instanceof AbstractMinecartEntity) || followerEntity.isRemoved()) {
+            if (!(followerEntity instanceof AbstractMinecartEntity follower) || follower.isRemoved()) {
                 betterminecarts$followerUuid = null;
+            } else {
+                // Follower is present: if it's lagging, slow down this leader cart to let it catch up.
+                // This propagates tension back through the chain, keeping the train cohesive on turns.
+                double followerDist = self.distanceTo(follower) - 1.0;
+                final double TARGET_SPACING = 1.4;
+                if (followerDist > TARGET_SPACING + 0.1) {
+                    double excess = followerDist - TARGET_SPACING;
+                    double slowdownFactor = Math.max(0.1, 1.0 - excess * 0.5);
+                    self.setVelocity(self.getVelocity().multiply(slowdownFactor));
+                }
             }
         }
     }
