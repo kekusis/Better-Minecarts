@@ -85,6 +85,8 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
             double leaderSpeed = leaderVel.length();
             double maxSpeed = this.getMaxSpeed(serverWorld);
 
+            Vec3d followerVel = self.getVelocity();
+
             if (distance > TARGET_SPACING) {
                 // Too far: catch up.
                 // We use a PD-like proportional boost (leaderSpeed + excess * 2.0) so the follower
@@ -92,7 +94,14 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
                 // Clamped to 3.0 * maxSpeed (e.g. 1.2) to overcome extreme corner projection angles.
                 double excess = distance - TARGET_SPACING;
                 double catchUpSpeed = Math.min(leaderSpeed + excess * 2.0, maxSpeed * 3.0);
-                self.setVelocity(dirToLeader.multiply(catchUpSpeed));
+                
+                Vec3d targetVel;
+                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToLeader) > 0.0) {
+                    targetVel = followerVel.normalize().multiply(catchUpSpeed);
+                } else {
+                    targetVel = dirToLeader.multiply(catchUpSpeed);
+                }
+                self.setVelocity(targetVel);
 
             } else if (distance < TARGET_SPACING - 0.3 && leaderSpeed < 0.05) {
                 // Too close and leader is stopped/stopping: nudge gently backward away from leader.
@@ -101,7 +110,14 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
 
             } else {
                 // In the sweet spot (or too close but in motion): match leader's speed.
-                self.setVelocity(dirToLeader.multiply(Math.min(leaderSpeed, maxSpeed)));
+                double matchSpeed = Math.min(leaderSpeed, maxSpeed);
+                Vec3d targetVel;
+                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToLeader) > 0.0) {
+                    targetVel = followerVel.normalize().multiply(matchSpeed);
+                } else {
+                    targetVel = dirToLeader.multiply(matchSpeed);
+                }
+                self.setVelocity(targetVel);
             }
 
             // ── Particle Tether ───────────────────────────────────────────────
