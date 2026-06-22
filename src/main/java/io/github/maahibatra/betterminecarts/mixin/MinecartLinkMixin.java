@@ -64,6 +64,20 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
             // distance - 1.0 accounts for the physical width of the minecart body (~1 block).
             // So distance == 0 means touching bumper-to-bumper, not same position.
             double distance = self.distanceTo(leader) - 1.0;
+
+            if (distance > 4.5) {
+                // Stretched too far / bugged out: auto-break the link
+                UUID oldLeaderUuid = betterminecarts$leaderUuid;
+                betterminecarts$leaderUuid = null;
+
+                Entity oldLeader = serverWorld.getEntity(oldLeaderUuid);
+                if (oldLeader instanceof AbstractMinecartEntity leaderCart) {
+                    ((MinecartLinkAccess) leaderCart).betterminecarts$setFollowerUuid(null);
+                }
+                self.dropStack(serverWorld, new ItemStack(Items.IRON_CHAIN));
+                return;
+            }
+
             final double TARGET_SPACING = 1.4; // center-to-center = ~2.4 blocks total
 
             Vec3d dirToLeader = leader.getEntityPos().subtract(self.getEntityPos()).normalize();
@@ -80,12 +94,13 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
                 double catchUpSpeed = Math.min(leaderSpeed + excess * 2.0, maxSpeed * 3.0);
                 self.setVelocity(dirToLeader.multiply(catchUpSpeed));
 
-            } else if (distance < TARGET_SPACING - 0.2) {
-                // Too close: nudge gently backward away from leader
+            } else if (distance < TARGET_SPACING - 0.3 && leaderSpeed < 0.05) {
+                // Too close and leader is stopped/stopping: nudge gently backward away from leader.
+                // This prevents reversing/getting stuck on tight corners and slopes while in motion.
                 self.setVelocity(dirToLeader.multiply(-0.05));
 
             } else {
-                // In the sweet spot: exactly match leader's speed.
+                // In the sweet spot (or too close but in motion): match leader's speed.
                 self.setVelocity(dirToLeader.multiply(Math.min(leaderSpeed, maxSpeed)));
             }
 
