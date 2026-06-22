@@ -18,11 +18,21 @@ import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 import java.util.UUID;
+import java.util.Deque;
+import java.util.LinkedList;
 
 @Mixin(AbstractMinecartEntity.class)
 public abstract class MinecartLinkMixin implements MinecartLinkAccess {
 
     @Shadow protected abstract double getMaxSpeed(ServerWorld world);
+
+    // Path history for follower tracking
+    @Unique private final Deque<Vec3d> betterminecarts$pathHistory = new LinkedList<>();
+
+    @Override
+    public Deque<Vec3d> betterminecarts$getPathHistory() {
+        return betterminecarts$pathHistory;
+    }
 
     // Directed linked list: this cart follows leaderUuid; followerUuid follows this cart.
     @Unique private UUID betterminecarts$leaderUuid = null;
@@ -49,7 +59,20 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
 
         ServerWorld serverWorld = (ServerWorld) self.getEntityWorld();
 
-        // ── Leader cleanup ────────────────────────────────────────────────────
+        // ── Path History Recording ────────────────────────────────────────────
+        if (betterminecarts$followerUuid == null) {
+            betterminecarts$pathHistory.clear();
+        } else {
+            Vec3d currentPos = self.getEntityPos();
+            if (betterminecarts$pathHistory.isEmpty() || currentPos.distanceTo(betterminecarts$pathHistory.peekLast()) > 0.05) {
+                betterminecarts$pathHistory.add(currentPos);
+                while (betterminecarts$pathHistory.size() > 200) {
+                    betterminecarts$pathHistory.poll();
+                }
+            }
+        }
+
+        // ── Leader cleanup & physics ──────────────────────────────────────────
         if (betterminecarts$leaderUuid != null) {
             Entity leaderEntity = serverWorld.getEntity(betterminecarts$leaderUuid);
 
@@ -60,12 +83,9 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
                 return;
             }
 
-            // ── Chain Physics (adapted from minecart-trains-fork) ─────────────
-            // distance - 1.0 accounts for the physical width of the minecart body (~1 block).
-            // So distance == 0 means touching bumper-to-bumper, not same position.
-            double distance = self.distanceTo(leader) - 1.0;
-
-            if (distance > 4.5) {
+            // ── Auto-Break Check (using actual spatial distance) ─────────────
+            double actualDistance = self.distanceTo(leader) - 1.0;
+            if (actualDistance > 4.5) {
                 // Stretched too far / bugged out: auto-break the link
                 UUID oldLeaderUuid = betterminecarts$leaderUuid;
                 betterminecarts$leaderUuid = null;
@@ -78,44 +98,56 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
                 return;
             }
 
-            final double TARGET_SPACING = 1.4; // center-to-center = ~2.4 blocks total
+            // ── Find Target Position in Leader's Path History ────────────────
+            final double TARGET_SPACING_CENTER = 2.4;
+            Deque<Vec3d> history = ((MinecartLinkAccess) leader).betterminecarts$getPathHistory();
+            Vec3d targetPos = leader.getEntityPos();
 
-            Vec3d dirToLeader = leader.getEntityPos().subtract(self.getEntityPos()).normalize();
+            if (history != null && !history.isEmpty()) {
+                for (Vec3d pos : history) {
+                    if (self.getEntityPos().distanceTo(pos) >= TARGET_SPACING_CENTER) {
+                        targetPos = pos;
+                        break;
+                    }
+                }
+            }
+
+            // ── Path-Based Chain Physics ──────────────────────────────────────
+            double centerDistance = self.getEntityPos().distanceTo(targetPos);
+            double distance = centerDistance - 1.0;
+            final double TARGET_SPACING = 1.4;
+
+            Vec3d dirToTarget = targetPos.subtract(self.getEntityPos()).normalize();
             Vec3d leaderVel   = leader.getVelocity();
             double leaderSpeed = leaderVel.length();
             double maxSpeed = this.getMaxSpeed(serverWorld);
-
             Vec3d followerVel = self.getVelocity();
 
             if (distance > TARGET_SPACING) {
-                // Too far: catch up.
-                // We use a PD-like proportional boost (leaderSpeed + excess * 2.0) so the follower
-                // actively speeds up relative to the leader to close the gap.
-                // Clamped to 3.0 * maxSpeed (e.g. 1.2) to overcome extreme corner projection angles.
+                // Too far from target point on leader's path: catch up.
                 double excess = distance - TARGET_SPACING;
                 double catchUpSpeed = Math.min(leaderSpeed + excess * 2.0, maxSpeed * 3.0);
                 
                 Vec3d targetVel;
-                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToLeader) > 0.0) {
+                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToTarget) > 0.0) {
                     targetVel = followerVel.normalize().multiply(catchUpSpeed);
                 } else {
-                    targetVel = dirToLeader.multiply(catchUpSpeed);
+                    targetVel = dirToTarget.multiply(catchUpSpeed);
                 }
                 self.setVelocity(targetVel);
 
             } else if (distance < TARGET_SPACING - 0.3 && leaderSpeed < 0.05) {
-                // Too close and leader is stopped/stopping: nudge gently backward away from leader.
-                // This prevents reversing/getting stuck on tight corners and slopes while in motion.
-                self.setVelocity(dirToLeader.multiply(-0.05));
+                // Too close and leader is stopped/stopping: nudge gently backward.
+                self.setVelocity(dirToTarget.multiply(-0.05));
 
             } else {
-                // In the sweet spot (or too close but in motion): match leader's speed.
+                // In the sweet spot (or too close but in motion): match speed along path.
                 double matchSpeed = Math.min(leaderSpeed, maxSpeed);
                 Vec3d targetVel;
-                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToLeader) > 0.0) {
+                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToTarget) > 0.0) {
                     targetVel = followerVel.normalize().multiply(matchSpeed);
                 } else {
-                    targetVel = dirToLeader.multiply(matchSpeed);
+                    targetVel = dirToTarget.multiply(matchSpeed);
                 }
                 self.setVelocity(targetVel);
             }
