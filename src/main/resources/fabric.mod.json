@@ -1,18 +1,14 @@
 {
   "schemaVersion": 1,
   "id": "betterminecarts",
-  "version": "1.0-SNAPSHOT",
+  "version": "${version}",
   "name": "BetterMinecarts",
-  "description": "Minecraft doesn't see the potential that minecarts do, so I fixed them!",
+  "description": "Server-side only minecart linking mod.",
   "authors": [],
   "contact": {},
   "license": "MIT",
-  "icon": "assets/betterminecarts/icon.png",
   "environment": "*",
   "entrypoints": {
-    "client": [
-      "io.github.maahibatra.betterminecarts.client.BetterminecartsClient"
-    ],
     "main": [
       "io.github.maahibatra.betterminecarts.Betterminecarts"
     ]

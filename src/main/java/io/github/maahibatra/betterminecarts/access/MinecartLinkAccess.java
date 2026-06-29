@@ -1,12 +1,9 @@
 package io.github.maahibatra.betterminecarts.access;
 
 import java.util.UUID;
-import java.util.Deque;
-import net.minecraft.util.math.Vec3d;
+import java.util.List;
 
 public interface MinecartLinkAccess {
-
-    Deque<Vec3d> betterminecarts$getPathHistory();
 
     // The cart this cart follows ("I pull this one along, or it pulls me")
     UUID betterminecarts$getLeaderUuid();
@@ -15,6 +12,9 @@ public interface MinecartLinkAccess {
     // The cart that follows this cart
     UUID betterminecarts$getFollowerUuid();
     void betterminecarts$setFollowerUuid(UUID uuid);
+
+    // Breadcrumb path history (only maintained if this cart is a leader)
+    List<Breadcrumb> betterminecarts$getBreadcrumbs();
 
     // Convenience helpers
     default boolean betterminecarts$hasLeader() { return betterminecarts$getLeaderUuid() != null; }

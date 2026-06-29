@@ -1,6 +1,7 @@
 package io.github.maahibatra.betterminecarts.mixin;
 
 import io.github.maahibatra.betterminecarts.access.MinecartLinkAccess;
+import io.github.maahibatra.betterminecarts.access.Breadcrumb;
 import net.minecraft.entity.Entity;
 import net.minecraft.entity.vehicle.AbstractMinecartEntity;
 import net.minecraft.item.ItemStack;
@@ -11,182 +12,157 @@ import net.minecraft.storage.ReadView;
 import net.minecraft.storage.WriteView;
 import net.minecraft.util.math.Vec3d;
 import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.Shadow;
 import org.spongepowered.asm.mixin.Unique;
 import org.spongepowered.asm.mixin.injection.At;
 import org.spongepowered.asm.mixin.injection.Inject;
 import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
+import java.lang.ref.WeakReference;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.UUID;
-import java.util.Deque;
-import java.util.LinkedList;
 
 @Mixin(AbstractMinecartEntity.class)
 public abstract class MinecartLinkMixin implements MinecartLinkAccess {
 
-    @Shadow protected abstract double getMaxSpeed(ServerWorld world);
-
-    // Path history for follower tracking
-    @Unique private final Deque<Vec3d> betterminecarts$pathHistory = new LinkedList<>();
-
-    @Override
-    public Deque<Vec3d> betterminecarts$getPathHistory() {
-        return betterminecarts$pathHistory;
-    }
-
-    // Directed linked list: this cart follows leaderUuid; followerUuid follows this cart.
     @Unique private UUID betterminecarts$leaderUuid = null;
     @Unique private UUID betterminecarts$followerUuid = null;
 
+    @Unique private final List<Breadcrumb> betterminecarts$breadcrumbs = new ArrayList<>();
+
+    @Unique private transient WeakReference<AbstractMinecartEntity> betterminecarts$leaderCache = null;
+    @Unique private transient WeakReference<AbstractMinecartEntity> betterminecarts$followerCache = null;
+
     // ── Interface implementation ──────────────────────────────────────────────
 
-    @Override public UUID betterminecarts$getLeaderUuid()   { return betterminecarts$leaderUuid; }
-    @Override public void betterminecarts$setLeaderUuid(UUID uuid) { this.betterminecarts$leaderUuid = uuid; }
+    @Override public UUID betterminecarts$getLeaderUuid() { return betterminecarts$leaderUuid; }
+    @Override public void betterminecarts$setLeaderUuid(UUID uuid) { 
+        this.betterminecarts$leaderUuid = uuid; 
+        this.betterminecarts$leaderCache = null;
+    }
 
-    @Override public UUID betterminecarts$getFollowerUuid()   { return betterminecarts$followerUuid; }
-    @Override public void betterminecarts$setFollowerUuid(UUID uuid) { this.betterminecarts$followerUuid = uuid; }
+    @Override public UUID betterminecarts$getFollowerUuid() { return betterminecarts$followerUuid; }
+    @Override public void betterminecarts$setFollowerUuid(UUID uuid) { 
+        this.betterminecarts$followerUuid = uuid; 
+        this.betterminecarts$followerCache = null;
+    }
 
-    // ── Per-entity tick injection ─────────────────────────────────────────────
-    // Runs at the HEAD of AbstractMinecartEntity.tick(), BEFORE moveOnRail().
-    // This is the architecturally correct place — vanilla reads velocity after this
-    // and moves the cart along the rail in the same tick.
-    @Inject(method = "tick", at = @At("HEAD"))
+    @Override public List<Breadcrumb> betterminecarts$getBreadcrumbs() { return betterminecarts$breadcrumbs; }
+
+    @Unique
+    private AbstractMinecartEntity betterminecarts$resolveLeader(ServerWorld world) {
+        if (betterminecarts$leaderUuid == null) return null;
+        if (betterminecarts$leaderCache != null) {
+            AbstractMinecartEntity cached = betterminecarts$leaderCache.get();
+            if (cached != null && !cached.isRemoved() && cached.getUuid().equals(betterminecarts$leaderUuid)) {
+                return cached;
+            }
+        }
+        Entity entity = world.getEntity(betterminecarts$leaderUuid);
+        if (entity instanceof AbstractMinecartEntity leader) {
+            betterminecarts$leaderCache = new WeakReference<>(leader);
+            return leader;
+        }
+        return null;
+    }
+
+    @Inject(method = "tick", at = @At("TAIL"))
     private void betterminecarts$tick(CallbackInfo ci) {
         AbstractMinecartEntity self = (AbstractMinecartEntity)(Object)this;
 
-        // Client side and removed entities: skip entirely
         if (self.getEntityWorld().isClient() || self.isRemoved()) return;
 
         ServerWorld serverWorld = (ServerWorld) self.getEntityWorld();
 
-        // ── Path History Recording ────────────────────────────────────────────
-        if (betterminecarts$followerUuid == null) {
-            betterminecarts$pathHistory.clear();
-        } else {
-            Vec3d currentPos = self.getEntityPos();
-            if (betterminecarts$pathHistory.isEmpty() || currentPos.distanceTo(betterminecarts$pathHistory.peekLast()) > 0.05) {
-                betterminecarts$pathHistory.add(currentPos);
-                while (betterminecarts$pathHistory.size() > 200) {
-                    betterminecarts$pathHistory.poll();
-                }
-            }
-        }
-
-        // ── Leader cleanup & physics ──────────────────────────────────────────
+        // 1. Process Leader Link (Physics & Pulling)
         if (betterminecarts$leaderUuid != null) {
-            Entity leaderEntity = serverWorld.getEntity(betterminecarts$leaderUuid);
+            AbstractMinecartEntity leader = betterminecarts$resolveLeader(serverWorld);
 
-            if (!(leaderEntity instanceof AbstractMinecartEntity leader) || leader.isRemoved()) {
-                // Leader is gone — clean up the link and drop the chain
-                betterminecarts$leaderUuid = null;
-                self.dropStack(serverWorld, new ItemStack(Items.IRON_CHAIN));
-                return;
-            }
+            if (leader != null) {
+                if (leader.isRemoved()) {
+                    // Leader was destroyed
+                    betterminecarts$setLeaderUuid(null);
+                    ((MinecartLinkAccess) leader).betterminecarts$setFollowerUuid(null);
+                    self.dropStack(serverWorld, new ItemStack(Items.IRON_CHAIN));
+                } else {
+                    List<Breadcrumb> leaderHistory = ((MinecartLinkAccess) leader).betterminecarts$getBreadcrumbs();
+                    double targetDist = 1.45;
+                    Vec3d targetPos = null;
+                    Vec3d targetVel = null;
 
-            // ── Auto-Break Check (using actual spatial distance) ─────────────
-            double actualDistance = self.distanceTo(leader) - 1.0;
-            if (actualDistance > 4.5) {
-                // Stretched too far / bugged out: auto-break the link
-                UUID oldLeaderUuid = betterminecarts$leaderUuid;
-                betterminecarts$leaderUuid = null;
+                    if (leaderHistory != null && leaderHistory.size() > 1) {
+                        double accum = 0.0;
+                        for (int i = 1; i < leaderHistory.size(); i++) {
+                            Vec3d p1 = leaderHistory.get(i - 1).pos;
+                            Vec3d p2 = leaderHistory.get(i).pos;
+                            double d = p1.distanceTo(p2);
+                            if (accum + d >= targetDist) {
+                                double f = (targetDist - accum) / d;
+                                targetPos = p1.add(p2.subtract(p1).multiply(f));
+                                targetVel = leaderHistory.get(i - 1).velocity.add(
+                                    leaderHistory.get(i).velocity.subtract(leaderHistory.get(i - 1).velocity).multiply(f)
+                                );
+                                break;
+                            }
+                            accum += d;
+                        }
+                    }
 
-                Entity oldLeader = serverWorld.getEntity(oldLeaderUuid);
-                if (oldLeader instanceof AbstractMinecartEntity leaderCart) {
-                    ((MinecartLinkAccess) leaderCart).betterminecarts$setFollowerUuid(null);
-                }
-                self.dropStack(serverWorld, new ItemStack(Items.IRON_CHAIN));
-                return;
-            }
+                    if (targetPos == null) {
+                        Vec3d leaderPos = leader.getEntityPos();
+                        Vec3d selfPos = self.getEntityPos();
+                        Vec3d dir = leaderPos.subtract(selfPos);
+                        double dist = dir.length();
+                        if (dist > 0.01) {
+                            Vec3d normDir = dir.normalize();
+                            targetPos = leaderPos.subtract(normDir.multiply(targetDist));
+                            targetVel = leader.getVelocity();
+                        } else {
+                            float yaw = leader.getYaw();
+                            Vec3d lookDir = Vec3d.fromPolar(0, yaw);
+                            targetPos = leaderPos.subtract(lookDir.multiply(targetDist));
+                            targetVel = leader.getVelocity();
+                        }
+                    }
 
-            // ── Find Target Position in Leader's Path History ────────────────
-            final double TARGET_SPACING_CENTER = 2.4;
-            Deque<Vec3d> history = ((MinecartLinkAccess) leader).betterminecarts$getPathHistory();
-            Vec3d targetPos = leader.getEntityPos();
+                    // Direct rigid positioning snap at TAIL of tick!
+                    self.setPosition(targetPos.x, targetPos.y, targetPos.z);
+                    self.setVelocity(targetVel);
 
-            if (history != null && !history.isEmpty()) {
-                for (Vec3d pos : history) {
-                    if (self.getEntityPos().distanceTo(pos) >= TARGET_SPACING_CENTER) {
-                        targetPos = pos;
-                        break;
+                    // Particle Tether
+                    Vec3d posA = leader.getEntityPos().add(0, 0.4, 0);
+                    Vec3d posB = self.getEntityPos().add(0, 0.4, 0);
+                    Vec3d diff = posB.subtract(posA);
+                    double totalDist = diff.length();
+
+                    if (totalDist > 1.4) {
+                        Vec3d dir = diff.normalize();
+                        DustParticleEffect dust = new DustParticleEffect(0x606060, 0.4f);
+                        for (double d = 0.7; d <= totalDist - 0.7; d += 0.07) {
+                            Vec3d p = posA.add(dir.multiply(d));
+                            serverWorld.spawnParticles(dust, p.x, p.y, p.z, 1, 0.0, 0.0, 0.0, 0);
+                        }
+                    }
+
+                    // Break if too far
+                    if (self.distanceTo(leader) > 12.0) {
+                        betterminecarts$setLeaderUuid(null);
+                        ((MinecartLinkAccess) leader).betterminecarts$setFollowerUuid(null);
+                        self.dropStack(serverWorld, new ItemStack(Items.IRON_CHAIN));
                     }
                 }
             }
-
-            // ── Path-Based Chain Physics ──────────────────────────────────────
-            double centerDistance = self.getEntityPos().distanceTo(targetPos);
-            double distance = centerDistance - 1.0;
-            final double TARGET_SPACING = 1.4;
-
-            Vec3d dirToTarget = targetPos.subtract(self.getEntityPos()).normalize();
-            Vec3d leaderVel   = leader.getVelocity();
-            double leaderSpeed = leaderVel.length();
-            double maxSpeed = this.getMaxSpeed(serverWorld);
-            Vec3d followerVel = self.getVelocity();
-
-            if (distance > TARGET_SPACING) {
-                // Too far from target point on leader's path: catch up.
-                double excess = distance - TARGET_SPACING;
-                double catchUpSpeed = Math.min(leaderSpeed + excess * 2.0, maxSpeed * 3.0);
-                
-                Vec3d targetVel;
-                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToTarget) > 0.0) {
-                    targetVel = followerVel.normalize().multiply(catchUpSpeed);
-                } else {
-                    targetVel = dirToTarget.multiply(catchUpSpeed);
-                }
-                self.setVelocity(targetVel);
-
-            } else if (distance < TARGET_SPACING - 0.3 && leaderSpeed < 0.05) {
-                // Too close and leader is stopped/stopping: nudge gently backward.
-                self.setVelocity(dirToTarget.multiply(-0.05));
-
-            } else {
-                // In the sweet spot (or too close but in motion): match speed along path.
-                double matchSpeed = Math.min(leaderSpeed, maxSpeed);
-                Vec3d targetVel;
-                if (followerVel.lengthSquared() > 0.0001 && followerVel.dotProduct(dirToTarget) > 0.0) {
-                    targetVel = followerVel.normalize().multiply(matchSpeed);
-                } else {
-                    targetVel = dirToTarget.multiply(matchSpeed);
-                }
-                self.setVelocity(targetVel);
-            }
-
-            // ── Particle Tether ───────────────────────────────────────────────
-            // Only render from the follower side to avoid double-rendering each pair.
-            Vec3d posA = leader.getEntityPos().add(0, 0.4, 0);
-            Vec3d posB = self.getEntityPos().add(0, 0.4, 0);
-            Vec3d diff = posB.subtract(posA);
-            double totalDist = diff.length();
-
-            if (totalDist > 1.4) {
-                Vec3d dir = diff.normalize();
-                DustParticleEffect dust = new DustParticleEffect(0x606060, 0.4f);
-                for (double d = 0.7; d <= totalDist - 0.7; d += 0.07) {
-                    Vec3d p = posA.add(dir.multiply(d));
-                    serverWorld.spawnParticles(dust, p.x, p.y, p.z, 1, 0.0, 0.0, 0.0, 0);
-                }
-            }
         }
 
-        // ── Follower slowdown / cleanup ───────────────────────────────────────
+        // 2. Update Breadcrumbs (if this cart has a follower)
         if (betterminecarts$followerUuid != null) {
-            Entity followerEntity = serverWorld.getEntity(betterminecarts$followerUuid);
-            if (!(followerEntity instanceof AbstractMinecartEntity follower) || follower.isRemoved()) {
-                betterminecarts$followerUuid = null;
-            } else {
-                // Follower is present: if it's lagging, slow down this leader cart to let it catch up.
-                // This propagates tension back through the chain, keeping the train cohesive on turns.
-                double followerDist = self.distanceTo(follower) - 1.0;
-                final double TARGET_SPACING = 1.4;
-                if (followerDist > TARGET_SPACING + 0.05) {
-                    // Lagging behind: apply a steep slowdown factor to the leader.
-                    // If excess is >= 0.5 blocks, the leader is choked down to 5% speed,
-                    // giving the follower immediate time to catch up.
-                    double excess = followerDist - TARGET_SPACING;
-                    double slowdownFactor = Math.max(0.05, 1.0 - excess * 2.0);
-                    self.setVelocity(self.getVelocity().multiply(slowdownFactor));
-                }
+            betterminecarts$breadcrumbs.add(0, new Breadcrumb(self.getEntityPos(), self.getVelocity()));
+            while (betterminecarts$breadcrumbs.size() > 100) {
+                betterminecarts$breadcrumbs.remove(betterminecarts$breadcrumbs.size() - 1);
+            }
+        } else {
+            if (!betterminecarts$breadcrumbs.isEmpty()) {
+                betterminecarts$breadcrumbs.clear();
             }
         }
     }
@@ -196,7 +172,6 @@ public abstract class MinecartLinkMixin implements MinecartLinkAccess {
     private void betterminecarts$cancelPush(Entity entity, CallbackInfo ci) {
         if (!(entity instanceof AbstractMinecartEntity other)) return;
         UUID otherId = other.getUuid();
-        // Cancel if this cart and the other are directly linked (in either direction)
         if (otherId.equals(betterminecarts$leaderUuid) || otherId.equals(betterminecarts$followerUuid)) {
             ci.cancel();
         }
